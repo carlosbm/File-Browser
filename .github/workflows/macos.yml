@@ -1,0 +1,199 @@
+name: macOS
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag del Release a crear o actualizar (vacío: solo artefacto)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.99.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build macOS arm64
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Caché de Cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: macos-arm64
+
+      - name: Compilar
+        run: cargo build --release --locked --bin filebrowser
+
+      - name: Resolver versión y tag
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag=""
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [ -n "$tag" ]; then
+            version="${tag#v}"
+          else
+            version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Tag: ${tag:-ninguno} · Versión: $version"
+
+      - name: Generar AppIcon.icns
+        run: |
+          set -euo pipefail
+          iconset="dist/AppIcon.iconset"
+          rm -rf "$iconset" dist/AppIcon.icns
+          mkdir -p "$iconset"
+          sips -z 16 16 assets/icon-128.png --out "$iconset/icon_16x16.png" >/dev/null
+          sips -z 32 32 assets/icon-128.png --out "$iconset/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32 assets/icon-128.png --out "$iconset/icon_32x32.png" >/dev/null
+          sips -z 64 64 assets/icon-128.png --out "$iconset/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128 assets/icon-128.png --out "$iconset/icon_128x128.png" >/dev/null
+          sips -z 256 256 assets/icon-256.png --out "$iconset/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256 assets/icon-256.png --out "$iconset/icon_256x256.png" >/dev/null
+          sips -z 512 512 assets/icon-512.png --out "$iconset/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512 assets/icon-512.png --out "$iconset/icon_512x512.png" >/dev/null
+          sips -z 1024 1024 assets/icon-512.png --out "$iconset/icon_512x512@2x.png" >/dev/null
+          iconutil -c icns "$iconset" -o dist/AppIcon.icns
+          rm -rf "$iconset"
+
+      - name: Empaquetar File Browser.app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          app="dist/File Browser.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/filebrowser "$app/Contents/MacOS/filebrowser"
+          cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleDisplayName</key>
+            <string>File Browser</string>
+            <key>CFBundleExecutable</key>
+            <string>filebrowser</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleIdentifier</key>
+            <string>rs.filebrowser</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>File Browser</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundleSupportedPlatforms</key>
+            <array>
+              <string>MacOSX</string>
+            </array>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.utilities</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSRequiresAquaSystemAppearance</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --sign - "$app"
+          codesign --verify --verbose "$app"
+
+      - name: Crear el DMG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage="dist/dmg-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp -R "dist/File Browser.app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          dmg="dist/FileBrowser-${VERSION}-macos-arm64.dmg"
+          rm -f "$dmg" "$dmg.sha256"
+          hdiutil create -volname "File Browser" -srcfolder "$stage" -ov -format UDZO "$dmg"
+          rm -rf "$stage"
+          ( cd dist && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256" )
+          ls -lh dist
+
+      - name: Escribir las notas del Release
+        if: steps.version.outputs.tag != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > dist/release-notes.md <<NOTES
+          Binario para macOS Apple Silicon (arm64), sin firmar ni notarizar: la primera vez macOS
+          mostrará el aviso de «desarrollador no identificado».
+
+          ## Instalación
+
+          1. Abre el \`.dmg\` y arrastra **File Browser** a *Aplicaciones*.
+          2. Clic derecho sobre la app → **Abrir**; o bien:
+             \`xattr -dr com.apple.quarantine "/Applications/File Browser.app"\`
+
+          ## Verificar la descarga
+
+          \`\`\`sh
+          shasum -a 256 -c FileBrowser-${VERSION}-macos-arm64.dmg.sha256
+          \`\`\`
+          NOTES
+
+      - name: Subir el artefacto
+        uses: actions/upload-artifact@v7
+        with:
+          name: FileBrowser-${{ steps.version.outputs.version }}-macos-arm64
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publicar el Release
+        if: steps.version.outputs.tag != ''
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: File Browser ${{ steps.version.outputs.version }}
+          body_path: dist/release-notes.md
+          files: |
+            dist/*.dmg
+            dist/*.sha256
+          fail_on_unmatched_files: true

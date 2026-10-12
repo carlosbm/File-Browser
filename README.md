@@ -24,6 +24,31 @@ RUSTFLAGS="-C target-feature=+crt-static" \
 
 The result is a single self-contained `.exe`.
 
+### macOS (Apple Silicon)
+
+Requires Rust 1.95 or newer (CI pins 1.99.0):
+
+```sh
+cargo build --release     # binary at target/release/filebrowser
+```
+
+GitHub Actions builds the macOS app on every `v*` tag, or manually from the *Actions* tab: it
+compiles the binary, wraps it in `File Browser.app` (icon and `Info.plist` included) and produces
+`FileBrowser-<version>-macos-arm64.dmg` plus its `.sha256`. On tags, both files are attached to the
+GitHub Release. The build is arm64 only and is neither signed nor notarized, so on first launch macOS
+warns about an unidentified developer: open the app with right click → *Open*, or drop the quarantine
+flag with
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/File Browser.app"
+```
+
+To publish a release, push a tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ### Android
 
 Requires the Android SDK (build-tools 34, platform 34), the NDK and the `aarch64-linux-android` Rust
